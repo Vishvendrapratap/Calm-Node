@@ -1,7 +1,7 @@
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const Otp = require("../models/Otp");
-
 
 const generateToken = (user) => {
   const secret = process.env.JWT_SECRET || "dev_secret";
@@ -13,7 +13,8 @@ const generateToken = (user) => {
   );
 };
 
-const generateOtpCode = () => String(Math.floor(100000 + Math.random() * 900000));
+const generateOtpCode = () =>
+  String(Math.floor(100000 + Math.random() * 900000));
 
 /**
  * ------------------------------------------------------------------
@@ -40,7 +41,6 @@ exports.sendOtp = async (req, res) => {
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
     await Otp.deleteMany({ phone });
-
     await Otp.create({ phone, code, expiresAt });
 
     console.log(`OTP for ${phone} is: ${code}`);
@@ -101,6 +101,86 @@ exports.verifyOtp = async (req, res) => {
       message: "Failed to verify OTP",
       error: err.message,
     });
+  }
+};
+
+exports.register = async (req, res) => {
+  try {
+    const { name, email, password, phone } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: "name, email and password are required",
+      });
+    }
+
+    const cleanName = String(name).trim();
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    if (!cleanName) {
+      return res.status(400).json({ message: "name is required" });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(cleanEmail)) {
+      return res.status(400).json({ message: "Invalid email format" });
+    }
+
+    if (String(password).length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters",
+      });
+    }
+
+    const existingUser = await User.findOne({ email: cleanEmail });
+    if (existingUser) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
+
+
+    if (phone) {
+      const existingPhone = await User.findOne({ phone: String(phone).trim() });
+      if (existingPhone) {
+        return res.status(409).json({ message: "Phone already registered" });
+      }
+    }
+
+
+    const hashedPassword = await bcrypt.hash(String(password), 10);
+
+    const user = await User.create({
+      name: cleanName,
+      email: cleanEmail,
+      password: hashedPassword,
+      phone: phone ? String(phone).trim() : undefined,
+      role: "USER",
+    });
+
+    return res.status(201).json({
+      message: "User registered successfully",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone || null,
+        role: user.role,
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+
+    if (err.code === 11000) {
+      const field =
+        Object.keys(err.keyPattern || err.keyValue || {})[0] || "field";
+      return res.status(409).json({ message: `${field} already exists` });
+    }
+
+    if (err.name === "ValidationError") {
+      return res.status(400).json({ message: err.message });
+    }
+
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
