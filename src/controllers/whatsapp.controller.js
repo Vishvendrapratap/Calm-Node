@@ -1,5 +1,7 @@
+const { now } = require("mongoose");
 const WaChat = require("../models/WaChat");
 const WaMessage = require("../models/WaMessage");
+
 
 exports.verifyWebhook = (req, res) => {
   const mode = req.query["hub.mode"];
@@ -15,16 +17,14 @@ exports.verifyWebhook = (req, res) => {
   return res.sendStatus(403);
 };
 
+
 exports.receiveWebhook = async (req, res) => {
-  
   res.sendStatus(200);
 
   try {
     const body = req.body;
 
-  
     console.log("[WA] webhook hit | hasEntry:", !!body?.entry);
-
     if (!body?.entry) return;
 
     for (const entry of body.entry) {
@@ -32,19 +32,49 @@ exports.receiveWebhook = async (req, res) => {
 
       for (const change of changes) {
         const value = change.value || {};
+
+
+        const statuses = value.statuses || [];
+        for (const status of statuses) {
+          const waMessageId = status.id;
+          const statusValue = (status.status || "").toUpperCase();
+          const timestamp = status.timestamp
+            ? new Date(Number(status.timestamp) * 1000)
+            : new Date();
+
+          console.log(
+            `[WA] STATUS | msgId=${waMessageId} | status=${statusValue}`
+          );
+
+          if (!waMessageId) continue;
+
+          const updated = await WaMessage.findOneAndUpdate(
+            { waMessageId },
+            {
+              status: statusValue,
+              statusAt: timestamp,
+              statusRaw: status
+            },
+            { new: true }
+          );
+
+          if (!updated) {
+            console.log(`[WA] STATUS ignored (message not found) | msgId=${waMessageId}`);
+          }
+        }
+
+
         const messages = value.messages || [];
 
         for (const msg of messages) {
           const waId = msg.from;
           const type = msg.type || "unknown";
-          const messageId = msg.id || ""; 
+          const messageId = msg.id || "";
 
-          
           console.log(`[WA] IN | waId=${waId} | type=${type} | msgId=${messageId}`);
 
           if (!waId) continue;
 
-          
           if (messageId) {
             const already = await WaMessage.findOne({ waMessageId: messageId });
             if (already) {
@@ -53,17 +83,18 @@ exports.receiveWebhook = async (req, res) => {
             }
           }
 
-         
+          const msgTime = msg.timestamp
+          ? new Date(Number(msg.timestamp) * 1000) : new Date();
+
           const chat = await WaChat.findOneAndUpdate(
             { waId },
             {
               $setOnInsert: { waId, status: "ACTIVE", minimized: false },
-              $set: { lastMessageAt: new Date() }
+              $set: { lastMessageAt: msgTime }
             },
             { new: true, upsert: true }
           );
 
-         
           const messageDoc = {
             chatId: chat._id,
             waId,
@@ -103,8 +134,7 @@ exports.receiveWebhook = async (req, res) => {
           await WaMessage.create(messageDoc);
           await chat.save();
 
-         
-          console.log(`[WA] saved | chatId=${chat._id} | msgId=${messageId || "NA"}`);
+          console.log(`[WA] saved | chatId=${chat._id} | msgId=${messageId}`);
         }
       }
     }
@@ -113,20 +143,16 @@ exports.receiveWebhook = async (req, res) => {
   }
 };
 
+
 exports.listChats = async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
     const skip = (page - 1) * limit;
 
-    const { status, minimized } = req.query;
-    const filter = {};
-    if (status) filter.status = String(status).trim();
-    if (minimized !== undefined) filter.minimized = minimized === "true";
-
     const [total, items] = await Promise.all([
-      WaChat.countDocuments(filter),
-      WaChat.find(filter).sort({ lastMessageAt: -1 }).skip(skip).limit(limit)
+      WaChat.countDocuments(),
+      WaChat.find().sort({ lastMessageAt: -1 }).skip(skip).limit(limit)
     ]);
 
     return res.status(200).json({ message: "Chats fetched", page, limit, total, items });
@@ -165,5 +191,60 @@ exports.updateChat = async (req, res) => {
     return res.status(200).json({ message: "Chat updated", chat });
   } catch (err) {
     return res.status(500).json({ message: "Failed to update chat", error: err.message });
+  }
+};
+
+
+exports.mockSendMessage = async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { text } = req.body;
+
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ message: "text is required" });
+    }
+
+    const chat = await WaChat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ message: "Chat not found" });
+    }
+
+    const mockMessageId = `mock-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const cleanText = String(text).trim();
+
+    const now = new Date();
+
+    const msg = await WaMessage.create({
+      chatId: chat._id,
+      waId: chat.waId,
+      waMessageId: mockMessageId,
+      direction: "OUT",
+      type: "text",
+      text: cleanText,
+      raw: {
+        mock: true,
+        text: cleanText,
+        createdAt: now.toISOString()
+      },
+      status: "SENT",
+      statusAt: now,
+      statusRaw: { mock: true, status: "SENT", at: now.toISOString() }
+    });
+
+    chat.lastMessageText = cleanText;
+    chat.lastMessageAt = now;
+    await chat.save();
+
+    return res.status(201).json({
+      message: "Mock outbound message saved",
+      chat,
+      item: msg
+    });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ message: "Duplicate message id (retry)" });
+    }
+    return res.status(500).json({ message: "Failed to mock send", error: err.message });
   }
 };

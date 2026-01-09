@@ -25,6 +25,14 @@ const WaMessageSchema = new mongoose.Schema(
       caption: { type: String, default: "" },
       url: { type: String, default: "" }
     },
+        status: {
+      type: String,
+      default: "",
+      enum: ["", "SENT", "DELIVERED", "READ", "FAILED", "UNKNOWN"]
+    },
+    statusAt: { type: Date, default: null },
+
+    statusRaw: { type: Object, default: {} },
 
     raw: { type: Object, default: {} }
   },
